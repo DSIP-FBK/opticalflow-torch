@@ -15,6 +15,7 @@ from ._ops import (
     check_flow,
     check_frames,
     gaussian_kernel1d,
+    no_autocast,
     pyramid_level,
     pyramid_levels,
     resize,
@@ -70,6 +71,7 @@ def _check_options(
     window: str,
     window_sigma: float | Tensor | None,
     eps: float | Tensor,
+    data_range: float,
 ) -> tuple[float, int, int, int]:
     """Validate the options of :func:`lucas_kanade`; returns ``pyr_scale, levels, winsize, iterations``."""
     _check_number(pyr_scale, "pyr_scale", tensor=False)
@@ -85,6 +87,7 @@ def _check_options(
             raise ValueError("window_sigma is only valid with window='gaussian'")
         _check_number(window_sigma, "window_sigma", tensor=True, positive=True)
     _check_number(eps, "eps", tensor=True, positive=True)
+    _check_number(data_range, "data_range", tensor=False, positive=True)
     return float(pyr_scale), levels, winsize, iterations
 
 
@@ -173,6 +176,7 @@ def _resize_flow(flow: Tensor, size: tuple[int, int], interpolation: Literal["li
 # ----------------------------------------------------------------------------------------------
 
 
+@no_autocast
 def lucas_kanade(
     frame0: Tensor,
     frame1: Tensor,
@@ -184,6 +188,7 @@ def lucas_kanade(
     window: Literal["box", "gaussian"] = "gaussian",
     window_sigma: float | Tensor | None = None,
     eps: float | Tensor = 1e-3,
+    data_range: float = 255.0,
     initial_flow: Tensor | None = None,
     return_confidence: bool = False,
 ) -> Tensor | tuple[Tensor, Tensor]:
@@ -199,8 +204,10 @@ def lucas_kanade(
     damped by 1/16 of the window-averaged squared residual that no displacement explains, which
     keeps updates below about 2 pixels of the level, and gradients moderate, where ``frame0`` is
     flat but ``frame1`` is not. Differentiable with respect to both frames, ``initial_flow``,
-    ``window_sigma`` and ``eps``. Frames with several channels sum their per-channel equations.
-    float16 and bfloat16 frames are processed in float32.
+    ``window_sigma`` and ``eps``. The defaults assume frames spanning 0-255; give ``data_range``
+    for others, e.g. ``data_range=1.0`` for frames in [0, 1]. Frames with several channels sum
+    their per-channel equations. float16 and bfloat16 frames are processed in float32, and
+    float32 frames stay in float32 inside :func:`torch.autocast`.
 
     Parameters
     ----------
@@ -224,17 +231,21 @@ def lucas_kanade(
         ``window="gaussian"``.
     eps : float or Tensor
         Positive, added to the diagonal of each window-averaged structure tensor (mean squared
-        intensity gradients), so it does not depend on ``winsize`` but scales with the squared
-        intensities: the default assumes intensities of roughly 0-255; multiply it by ``s**2``
-        for intensities ``s`` times as large. It damps updates where there is no texture, a
-        smooth version of OpenCV's minimum-eigenvalue cut. Floored at about 1e-19 in float32
-        and 1e-154 in float64.
+        intensity gradients) of frames spanning 0-255, so it does not depend on ``winsize``; for
+        frames spanning ``data_range``, ``eps * (data_range / 255) ** 2``. It damps updates where
+        there is no texture, a smooth version of OpenCV's minimum-eigenvalue cut. Floored at
+        about 1e-19 in float32 and 1e-154 in float64.
+    data_range : float
+        Span of the frame values, positive: 255 for 0-255 frames, 1.0 for frames in [0, 1].
+        Frames scaled together with it give the same flow. Too large a value holds the flow
+        back where the texture is weak.
     initial_flow : Tensor, optional
         Starting estimate, shape ``(B, 2, H, W)``.
     return_confidence : bool
         Also return the smallest eigenvalue of each pixel's window-averaged structure tensor
         (without ``eps``, pixels displaced outside ``frame1`` counting as zero) at full
-        resolution in the last iteration, shape ``(B, H, W)``.
+        resolution in the last iteration, shape ``(B, H, W)``. It scales with the square of the
+        frame values, not with ``data_range``.
 
     Returns
     -------
@@ -243,14 +254,17 @@ def lucas_kanade(
     """
     check_frames(frame0, frame1)
     pyr_scale, levels, winsize, iterations = _check_options(
-        pyr_scale, levels, winsize, iterations, window, window_sigma, eps
+        pyr_scale, levels, winsize, iterations, window, window_sigma, eps, data_range
     )
     if initial_flow is not None:
         check_flow(initial_flow, frame0, "initial_flow")
     dtype = frame0.dtype
     compute = torch.promote_types(dtype, torch.float32)
     batch, _, height, width = frame0.shape
-    frames = torch.cat((frame0, frame1)).to(compute)
+    # in units of 0-255 frames, where eps applies: the same as eps * (data_range / 255) ** 2 on the
+    # frames as given, with the floor below at the same place for every data_range
+    scale = 255 / data_range
+    frames = torch.cat((frame0, frame1)).to(compute) * scale
     kernel = _window_kernel(window, winsize, window_sigma, frames)
     # below this, 1 / eps on flat windows overflows in the backward
     eps = as_scalar(eps, frames, "eps").clamp(min=torch.finfo(compute).tiny ** 0.5)
@@ -287,7 +301,7 @@ def lucas_kanade(
             averaged = separable_filter(terms * _inside(flow), kernel, kernel)
             flow = flow + _update(averaged, eps)
     if return_confidence:
-        return flow.to(dtype), _min_eigenvalue(averaged).to(dtype)
+        return flow.to(dtype), (_min_eigenvalue(averaged) / scale**2).to(dtype)
     return flow.to(dtype)
 
 
@@ -320,7 +334,8 @@ class LucasKanade(nn.Module):
     learnable : bool or iterable of str
         Parameters to register as :class:`torch.nn.Parameter`, among ``"window_sigma"``
         (Gaussian window only) and ``"eps"``; ``True`` means all that apply. They are stored
-        as logarithms so they stay positive.
+        as logarithms so they stay positive. ``eps`` stays in units of 0-255 frames, so a
+        learned value carries over to another ``data_range``, which is not learnable.
     """
 
     def __init__(
@@ -333,6 +348,7 @@ class LucasKanade(nn.Module):
         window: Literal["box", "gaussian"] = "gaussian",
         window_sigma: float | None = None,
         eps: float = 1e-3,
+        data_range: float = 255.0,
         learnable: bool | Iterable[str] = False,
     ) -> None:
         super().__init__()
@@ -340,9 +356,10 @@ class LucasKanade(nn.Module):
             if value is not None:
                 _check_number(value, name, tensor=False)
         self.pyr_scale, self.levels, self.winsize, self.iterations = _check_options(
-            pyr_scale, levels, winsize, iterations, window, window_sigma, eps
+            pyr_scale, levels, winsize, iterations, window, window_sigma, eps, data_range
         )
         self.window = window
+        self.data_range = float(data_range)
         names = _learnable_names(learnable, window, self.winsize)
         if window_sigma is None and "window_sigma" in names:
             window_sigma = 0.3 * (self.winsize // 2)
@@ -368,6 +385,7 @@ class LucasKanade(nn.Module):
         """Current ``eps``, a tensor if learnable."""
         return self._value("eps")
 
+    @no_autocast
     def forward(
         self,
         frame0: Tensor,
@@ -386,6 +404,7 @@ class LucasKanade(nn.Module):
             window=self.window,
             window_sigma=self.window_sigma,
             eps=self.eps,
+            data_range=self.data_range,
             initial_flow=initial_flow,
             return_confidence=return_confidence,
         )
@@ -399,6 +418,7 @@ class LucasKanade(nn.Module):
             f"window={self.window!r}",
         ]
         fields += [f"{name}={value}" for name, value in self._fixed.items() if value is not None]
+        fields.append(f"data_range={self.data_range}")
         learnable = [name for name in _LEARNABLE if name not in self._fixed]
         if learnable:
             fields.append(f"learnable={learnable}")

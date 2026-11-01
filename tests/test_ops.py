@@ -1,14 +1,30 @@
-"""Tests of the internal building blocks, mostly against OpenCV."""
+"""Tests of the internal building blocks, mostly against OpenCV, and of the autocast guard of the public functions."""
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 import numpy as np
 import pytest
 import torch
-from synthetic import image_from_cv, image_to_cv, smooth_texture
+from synthetic import AnalyticTexture, image_from_cv, image_to_cv, make_pair, rotation_flow, smooth_texture
 from torch.autograd import gradcheck
 
-from opticalflow_torch import _ops
+import opticalflow_torch
+from opticalflow_torch import (
+    Farneback,
+    LucasKanade,
+    _ops,
+    consistency,
+    endpoint_error,
+    farneback,
+    flow_to_rgb,
+    interpolate_frames,
+    lucas_kanade,
+    photometric_error,
+    resize_flow,
+    warp,
+)
 
 cv2 = pytest.importorskip("cv2")
 
@@ -481,3 +497,91 @@ def test_compile_pyramid(device: torch.device) -> None:
     compiled = torch.compile(fn, fullgraph=True)
     for out, ref in zip(compiled(x), fn(x), strict=True):
         torch.testing.assert_close(out, ref, rtol=0, atol=8 * ULP255)
+
+
+# ----------------------------------------------------------------------------------------------
+# Autocast
+# ----------------------------------------------------------------------------------------------
+
+AUTOCAST = [
+    pytest.param("cpu", torch.bfloat16, id="cpu-bfloat16"),
+    pytest.param("cuda", torch.float16, id="cuda-float16", marks=pytest.mark.cuda),
+    pytest.param("cuda", torch.bfloat16, id="cuda-bfloat16", marks=pytest.mark.cuda),
+]
+
+
+def public_calls(device: str) -> dict[str, Callable[[], object]]:
+    """A call of each public name on float32 inputs, the frames in 0-255."""
+    flow = rotation_flow(64, 72, 3.0, device=device) + 2.0
+    frame0, frame1 = make_pair(AnalyticTexture(3, channels=2), flow)
+    options = {"levels": 1, "iterations": 3, "learnable": True}
+    return {
+        "Farneback": lambda: Farneback(window="gaussian", **options).to(device)(frame0, frame1, 0.5 * flow, True),
+        "LucasKanade": lambda: LucasKanade(window="box", **options).to(device)(frame0, frame1, 0.5 * flow, True),
+        "consistency": lambda: consistency(flow, 0.1 - flow),
+        "endpoint_error": lambda: endpoint_error(flow, 0.9 * flow),
+        "farneback": lambda: farneback(frame0, frame1, return_confidence=True),
+        "flow_to_rgb": lambda: flow_to_rgb(flow),
+        "interpolate_frames": lambda: interpolate_frames(frame0, frame1, flow, [0.3, 0.7], match_distribution=True),
+        "lucas_kanade": lambda: lucas_kanade(frame0, frame1, return_confidence=True),
+        "photometric_error": lambda: photometric_error(frame0, frame1, flow),
+        "resize_flow": lambda: resize_flow(flow, (40, 90), mode="bicubic"),
+        "warp": lambda: warp(frame1, flow, mode="bicubic"),
+    }
+
+
+def test_public_calls_cover_the_api() -> None:
+    assert sorted(public_calls("cpu")) == sorted(opticalflow_torch.__all__)
+
+
+@pytest.mark.parametrize(("device_type", "dtype"), AUTOCAST)
+@pytest.mark.parametrize("name", opticalflow_torch.__all__)
+def test_autocast_changes_nothing(name: str, device_type: str, dtype: torch.dtype) -> None:
+    # Autocast used to run the convolutions of the flow methods in half precision. On these frames
+    # lucas_kanade gave NaN under CUDA float16 and flows 0.12 px off under bfloat16, farneback flows
+    # up to 0.17 px off, and the Farneback module NaN on 61% of the pixels under CUDA float16. The
+    # other functions were not affected.
+    call = public_calls(device_type)[name]
+    expected = call()
+    with torch.autocast(device_type, dtype=dtype):
+        out = call()
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(("device_type", "dtype"), AUTOCAST)
+@pytest.mark.parametrize("module", [Farneback, LucasKanade])
+def test_autocast_half_module(module: type[torch.nn.Module], device_type: str, dtype: torch.dtype) -> None:
+    # A module in the autocast dtype. Its learnable values used to be computed before the guard, and
+    # CUDA autocast runs exp in float32: with bfloat16 parameters eps went from 0.300781 to 0.300254,
+    # and the flows moved by up to 0.011 px.
+    flow = rotation_flow(64, 72, 3.0, device=device_type) + 2.0
+    frame0, frame1 = make_pair(AnalyticTexture(3), flow)
+    model = module(levels=1, iterations=3, eps=0.3, learnable=True).to(device_type, dtype)
+
+    def step(autocast: bool) -> tuple[torch.Tensor, ...]:
+        model.zero_grad()
+        with torch.autocast(device_type, dtype=dtype, enabled=autocast):
+            out = model(frame0, frame1)
+        out.square().mean().backward()
+        return out, *(p.grad for p in model.parameters())
+
+    torch.testing.assert_close(step(True), step(False), rtol=0, atol=0)
+
+
+@pytest.mark.compile
+def test_autocast_under_compile(device: torch.device) -> None:
+    torch._dynamo.reset()
+    flow = rotation_flow(40, 44, 3.0, device=device) + 1.0
+    frame0, frame1 = make_pair(AnalyticTexture(3), flow)
+
+    def fn(f0: torch.Tensor, f1: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        options = {"levels": 0, "iterations": 2, "winsize": 7}
+        return farneback(f0, f1, **options), lucas_kanade(f0, f1, **options)
+
+    expected = fn(frame0, frame1)
+    compiled = torch.compile(fn, fullgraph=True)
+    with torch.autocast(device.type, dtype=torch.float16 if device.type == "cuda" else torch.bfloat16):
+        out = compiled(frame0, frame1)
+    # Inductor's rounding moves the flows by up to 7e-5 px, with or without autocast; autocast used to
+    # move them by 0.02-0.28 px
+    torch.testing.assert_close(out, expected, rtol=0, atol=5e-4)

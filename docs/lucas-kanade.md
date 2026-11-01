@@ -49,8 +49,9 @@ resampling, differences do not.
 
 Where the window has little texture, the structure tensor is close to singular and the damping
 holds the update back: the flow there comes from the coarser levels and from the averaging with
-neighbouring pixels. The structure tensor scales with the square of the intensities, and so should
-`eps` (see [Value range](conventions.md#value-range)). With `return_confidence=True` you also get
+neighbouring pixels. The structure tensor scales with the square of the intensities, and `eps`
+with it: `eps` is given for frames spanning 0-255 and follows `data_range` for others (see
+[Value range](conventions.md#value-range)). With `return_confidence=True` you also get
 the smallest eigenvalue of the structure tensor (without `eps`) at full resolution: near zero on
 flat areas, on straight edges and where the displaced positions leave `frame1`, large on corners
 and texture.

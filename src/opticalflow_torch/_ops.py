@@ -6,10 +6,12 @@ rounding of sizes), so that ported algorithms can be compared with OpenCV number
 
 from __future__ import annotations
 
+import functools
 import math
 import operator
+from collections.abc import Callable
 from fractions import Fraction
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, ParamSpec, TypeVar
 
 import torch
 import torch.nn.functional as F
@@ -20,6 +22,49 @@ Border = Literal["reflect101", "replicate", "zeros"]
 ``BORDER_REPLICATE`` (``aaaaaa|abcdefgh|hhhhhhh``) or zeros."""
 
 _BORDERS = ("reflect101", "replicate", "zeros")
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+# ----------------------------------------------------------------------------------------------
+# Autocast
+# ----------------------------------------------------------------------------------------------
+
+
+def _autocast_devices() -> frozenset[str]:
+    """Device types that :func:`torch.autocast` supports, among those PyTorch knows of."""
+    if not hasattr(torch.amp, "is_autocast_available"):  # PyTorch 2.2 accepts these
+        return frozenset(("cpu", "cuda", "xpu", "ipu", "hpu", "xla"))
+    candidates = ("cpu", "cuda", "xpu", "mps", "hpu", "mtia", "xla", "ipu")
+    return frozenset(t for t in candidates if torch.amp.is_autocast_available(t))
+
+
+_AUTOCAST_DEVICES = _autocast_devices()  # once: torch.compile cannot trace is_autocast_available (PyTorch 2.7)
+
+
+def no_autocast(fn: Callable[P, R]) -> Callable[P, R]:
+    """Run ``fn`` with autocast disabled for the device type of its first argument (after ``self``), a tensor.
+
+    Inside :func:`torch.autocast`, convolutions and some other operations run in float16 or
+    bfloat16 whatever the dtype of their inputs: squared gradients of 0-255 frames overflow
+    float16, and flows lose precision. With this, the public functions give the same results
+    inside and outside autocast. They compute on the device of their first argument; device types
+    without autocast need nothing. On a module's ``forward``, it also covers the learnable values
+    computed from the parameters, such as ``exp`` (float32 under CUDA autocast).
+    """
+    index = 1 if fn.__code__.co_varnames[0] == "self" else 0
+    first = fn.__code__.co_varnames[index]
+
+    @functools.wraps(fn)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        tensor = args[index] if len(args) > index else kwargs.get(first)
+        if isinstance(tensor, Tensor) and tensor.device.type in _AUTOCAST_DEVICES:
+            with torch.autocast(tensor.device.type, enabled=False):
+                return fn(*args, **kwargs)
+        return fn(*args, **kwargs)
+
+    return wrapper
 
 
 # ----------------------------------------------------------------------------------------------

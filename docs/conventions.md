@@ -75,21 +75,38 @@ A single-channel OpenCV image `img` of shape `(H, W)` becomes `torch.from_numpy(
 
 ## Value range
 
-Values are used as given, without normalisation. Like OpenCV, the default `eps` of
 [`farneback`][opticalflow_torch.farneback.farneback] and
-[`lucas_kanade`][opticalflow_torch.lucas_kanade.lucas_kanade] assumes intensities of roughly
-0-255. `eps` regularises the 2x2 system of each pixel, whose size depends on the scale of the
-values: multiplying the frames by \(s\) multiplies the Farneback determinant by \(s^4\) and the
-Lucas-Kanade structure tensor by \(s^2\). With values in [0, 1], in mm/h or in dBZ, either rescale
-the frames to about 0-255 or scale `eps` accordingly (by \(s^4\) for Farneback, by \(s^2\) for
-Lucas-Kanade); the two give the same flow. Otherwise `eps` dominates and the flow shrinks towards
-zero: a texture in [0, 1] shifted by 1.5 pixels gets a Farneback flow of about 0.0002 pixels with
-the default `eps`.
+[`lucas_kanade`][opticalflow_torch.lucas_kanade.lucas_kanade] (and their modules) take the span of
+the frame values as `data_range`, 255 by default:
 
 ```python
-flow = farneback(255 * frame0, 255 * frame1)  # frames in [0, 1]
-flow = farneback(frame0, frame1, eps=1e-3 / 255**4)  # the same flow
+flow = farneback(frame0, frame1)  # frames in 0-255
+flow = farneback(frame0, frame1, data_range=1.0)  # frames in [0, 1]
+flow = lucas_kanade(frame0, frame1, data_range=60.0)  # reflectivity in 0-60 dBZ
 ```
+
+`eps` regularises the 2x2 system of each pixel, whose size depends on the scale of the values:
+multiplying the frames by \(s\) multiplies the Farneback determinant by \(s^4\) and the
+Lucas-Kanade structure tensor by \(s^2\). So `eps` is given for frames spanning 0-255, where
+OpenCV's fixed value applies, and on frames spanning `data_range` it acts as
+`eps * (data_range / 255) ** 4` (Farneback) or `eps * (data_range / 255) ** 2` (Lucas-Kanade).
+Frames scaled together with `data_range` give the same flow, and gradients scaled inversely: the
+frames are brought to 0-255 internally, so nothing but rounding depends on the scale. A learned
+`eps` keeps its meaning for any `data_range`. The confidence output is that of the frames as given:
+it scales with the square of the frame values, not with `data_range`.
+
+`data_range` sets how much contrast counts as texture, so give the span of the values: too large a
+value shortens the flows. Farneback, whose `eps` goes with the fourth power, is the most sensitive:
+on radar frames, its flows were 6-7% too short with `data_range` twice too large, and a third too
+short for frames in 0-60 dBZ left at the default. Frames in [0, 1] left at the default get a
+Farneback flow of about zero (0.0002 pixels for a texture shifted by 1.5 pixels, as with OpenCV),
+but a Lucas-Kanade flow held back only where the texture is weak, which is easy to miss: on the
+same radar frames, 9% too short on average and 1.1 pixels off.
+
+The default is 255 rather than 1 because the opposite mistake is worse: 0-255 frames with
+`data_range=1.0` have no regularisation where they are flat. On radar frames, Farneback then gave
+flows of up to 300 pixels in dry areas and gradients with respect to the frames of up to 3e8,
+against about 25 pixels and 1e-3 with the default.
 
 Missing values must be filled before estimating a flow: a NaN spreads through the filters to its
 whole neighbourhood.
@@ -101,6 +118,12 @@ nothing is copied between devices. [`warp`][opticalflow_torch.warp.warp],
 [`farneback`][opticalflow_torch.farneback.farneback] and
 [`lucas_kanade`][opticalflow_torch.lucas_kanade.lucas_kanade] also accept float16 and bfloat16
 inputs: they compute in float32 and return the input dtype.
+
+Inside a `torch.autocast` region every function and module gives the same result as outside it:
+autocast is turned off for the device of the inputs while it runs. Otherwise float16 autocast would
+make the convolutions of 0-255 frames overflow, and Lucas-Kanade flows NaN. Nor do they promote
+mixed dtypes as autocast does: the frames and flows of a call must share one dtype, so cast a
+model's float16 output with `.float()` before passing it with float32 frames or flows.
 
 The functions have no Python control flow that depends on tensor values, so they work under
 `torch.compile`, from PyTorch 2.7: the compiler of earlier versions crashes on some of them or

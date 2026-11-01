@@ -45,3 +45,11 @@ def dtype(request: pytest.FixtureRequest) -> torch.dtype:
 @pytest.fixture(autouse=True)
 def _seed() -> None:
     torch.manual_seed(0)
+
+
+@pytest.fixture
+def grad_scaler() -> torch.amp.GradScaler:
+    """A CUDA gradient scaler; ``torch.amp.GradScaler`` is ``torch.cuda.amp.GradScaler`` before PyTorch 2.3."""
+    if hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler("cuda")
+    return torch.cuda.amp.GradScaler()

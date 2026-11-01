@@ -377,6 +377,19 @@ def test_dry_frames(device: torch.device, dtype: torch.dtype, quantiles: int) ->
             assert all(torch.isfinite(g).all() for g in grads)
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+@pytest.mark.parametrize("where", ["frame1", "flow"])
+def test_matching_non_finite(device: torch.device, where: str, value: float) -> None:
+    # A NaN position in the target's quantile function used to become the index -2**63: an
+    # IndexError on the CPU, and on CUDA a device-side assert that ends the process.
+    frame0, frame1, flow, _ = random_inputs(batch=2, height=16, width=18, device=device)
+    expected = interpolate_frames(frame0[1:], frame1[1:], flow[1:], [0.3, 0.6], match_distribution=True)
+    (frame1 if where == "frame1" else flow)[0, 0, 7, 9] = value
+    out = interpolate_frames(frame0, frame1, flow, [0.3, 0.6], match_distribution=True)
+    assert not out[0].isfinite().all()
+    torch.testing.assert_close(out[1:], expected, rtol=0, atol=1e-12)
+
+
 # ----------------------------------------------------------------------------------------------
 # Gradients and compilation
 # ----------------------------------------------------------------------------------------------

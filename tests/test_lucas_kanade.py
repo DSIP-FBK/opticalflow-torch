@@ -151,12 +151,41 @@ def test_eps_scales_with_squared_intensities(device: torch.device) -> None:
     frame0, frame1 = (127.5 + 0.25 * (frame - 127.5) for frame in make_pair(texture, flow))
     reference = lucas_kanade(frame0, frame1)
     for scale in (1 / 255, 10.0):
-        scaled = lucas_kanade(scale * frame0, scale * frame1, eps=1e-3 * scale**2)
-        torch.testing.assert_close(scaled, reference, rtol=0, atol=1e-9)  # measured 1.3e-13
-    # the default eps assumes 0-255: measured 0.020 px, and 1.55 px on the same frames in [0, 1]
+        for kwargs in ({"eps": 1e-3 * scale**2}, {"data_range": 255 * scale}):
+            scaled = lucas_kanade(scale * frame0, scale * frame1, **kwargs)
+            torch.testing.assert_close(scaled, reference, rtol=0, atol=1e-9)  # measured 1.3e-13
+    # the default data_range is 255: measured 0.020 px, and 1.55 px on the same frames in [0, 1]
     mask = interior(flow, 16)
     assert endpoint_error(reference, flow)[mask].mean().item() < 0.05
     assert endpoint_error(lucas_kanade(frame0 / 255, frame1 / 255), flow)[mask].mean().item() > 0.5
+
+
+@pytest.mark.parametrize("scale", [1e-3, 1 / 255, 1e4])
+def test_data_range_scales_with_the_frames(scale: float, device: torch.device, dtype: torch.dtype) -> None:
+    flow = rotation_flow(64, 72, 3.0, device=device, dtype=dtype) + 1.5
+    frame0, frame1 = make_pair(AnalyticTexture(5), flow)
+    weights = torch.randn(1, 2, 64, 72, device=device, dtype=dtype)
+    options = {"levels": 1, "iterations": 3, "return_confidence": True}
+
+    def run(f0: torch.Tensor, f1: torch.Tensor, **extra: float) -> tuple[torch.Tensor, ...]:
+        f0 = f0.clone().requires_grad_()
+        out, confidence = lucas_kanade(f0, f1, **options, **extra)
+        return out, confidence, *torch.autograd.grad((out * weights).sum(), f0)
+
+    out, confidence, grad = run(frame0, frame1)
+    default = run(frame0, frame1, data_range=255.0)
+    assert torch.equal(default[0], out) and torch.equal(default[1], confidence)
+    # frames and data_range scaled alike: the same flow, the confidence times scale ** 2 and the
+    # gradients divided by scale. Measured: flows within 3e-6 px in float32 and 4e-15 px in float64,
+    # confidences and gradients within 3e-6 and 5e-15 of their largest values.
+    tol = 1e-4 if dtype == torch.float32 else 1e-10
+    scaled = run(scale * frame0, scale * frame1, data_range=255 * scale)
+    torch.testing.assert_close(scaled[0], out, rtol=0, atol=tol)
+    torch.testing.assert_close(scaled[1] / scale**2, confidence, rtol=0, atol=tol * confidence.abs().max().item())
+    torch.testing.assert_close(scaled[2] * scale, grad, rtol=0, atol=tol * grad.abs().max().item())
+    # which is eps * (data_range / 255) ** 2 on the frames as given
+    rescaled_eps = lucas_kanade(scale * frame0, scale * frame1, eps=1e-3 * scale**2, **options)[0]
+    torch.testing.assert_close(rescaled_eps, out, rtol=0, atol=tol)
 
 
 def test_residual_damping_spares_explained_motions(device: torch.device) -> None:
@@ -481,6 +510,23 @@ def test_module_parameters() -> None:
     assert "window_sigma" not in repr(only).split("learnable")[0]
     copy = LucasKanade(learnable=True)
     copy.load_state_dict(model.state_dict())
+    assert "data_range=255.0" in repr(model) and "data_range=1.0" in repr(LucasKanade(data_range=1))
+
+
+def test_module_data_range(device: torch.device) -> None:
+    # eps is stored in units of 0-255 frames, so a learned value carries over to another data_range
+    flow = rotation_flow(64, 72, 4.0, device=device) + translation_flow(64, 72, 1.2, -0.7, device=device)
+    frame0, frame1 = make_pair(AnalyticTexture(7, channels=2), flow)
+    model = LucasKanade(levels=1, iterations=3, eps=100.0, learnable=True).to(device)  # as if trained
+    unit = LucasKanade(levels=1, iterations=3, data_range=1.0, learnable=True).to(device)
+    unit.load_state_dict(model.state_dict())
+    assert unit.eps.item() == pytest.approx(100.0)
+    outs = []
+    for m, scale in ((model, 1.0), (unit, 1 / 255)):
+        out = m(scale * frame0, scale * frame1)
+        outs.append((out, torch.autograd.grad(endpoint_error(out, flow).mean(), list(m.parameters()))))
+    torch.testing.assert_close(outs[1][0], outs[0][0], rtol=0, atol=1e-4)
+    torch.testing.assert_close(outs[1][1], outs[0][1], rtol=1e-4, atol=0)
 
 
 def test_module_training(device: torch.device) -> None:
@@ -500,6 +546,25 @@ def test_module_training(device: torch.device) -> None:
     # measured: 0.55 -> 0.069 px, eps 0.05 -> 0.012, window_sigma 1 -> 3.4
     assert losses[-1] < 0.25 * losses[0]
     assert model.eps.item() < 0.025 and model.window_sigma.item() > 2
+
+
+@pytest.mark.cuda
+def test_mixed_precision_training_step(grad_scaler: torch.amp.GradScaler) -> None:
+    # float32 frames inside autocast(float16), with a GradScaler. Under autocast, the convolutions of
+    # squared 0-255 gradients used to overflow float16: NaN flows on most pixels.
+    flow = rotation_flow(96, 112, 3.0, device="cuda") + translation_flow(96, 112, 2.5, -1.5, device="cuda")
+    frame0, frame1 = (frame.requires_grad_() for frame in make_pair(AnalyticTexture(1), flow))
+    model = LucasKanade(learnable=True).cuda()
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
+    with torch.autocast("cuda", dtype=torch.float16):
+        out = model(frame0, frame1)
+        loss = endpoint_error(out, flow).mean()
+    grad_scaler.scale(loss).backward()
+    grad_scaler.step(optimizer)
+    grad_scaler.update()
+    assert out.dtype == torch.float32 and out.isfinite().all()
+    assert all(tensor.grad.isfinite().all() for tensor in (frame0, frame1, *model.parameters()))
+    assert grad_scaler.get_scale() == 2.0**16  # halved if the step had been skipped for non-finite gradients
 
 
 # ----------------------------------------------------------------------------------------------
@@ -535,6 +600,14 @@ def test_validation() -> None:
         ({"eps": float("nan")}, ValueError, "eps"),
         ({"eps": "small"}, TypeError, "eps"),
         ({"eps": torch.tensor(1)}, TypeError, "eps"),
+        ({"data_range": 0.0}, ValueError, "data_range must be positive"),
+        ({"data_range": -1}, ValueError, "data_range must be positive"),
+        ({"data_range": float("inf")}, ValueError, "data_range must be finite"),
+        ({"data_range": float("nan")}, ValueError, "data_range must be finite"),
+        ({"data_range": "1"}, TypeError, "data_range must be a float"),
+        ({"data_range": None}, TypeError, "data_range must be a float"),
+        ({"data_range": False}, TypeError, "data_range must be a float"),
+        ({"data_range": torch.tensor(1.0)}, TypeError, "data_range must be a float"),
     ]
     for kwargs, error, match in cases:
         with pytest.raises(error, match=match):
@@ -555,6 +628,8 @@ def test_module_validation() -> None:
         LucasKanade(learnable=3)
     with pytest.raises(TypeError, match="eps"):
         LucasKanade(eps=torch.tensor(1.0))
+    with pytest.raises(TypeError, match="data_range"):
+        LucasKanade(data_range=torch.tensor(1.0))
 
 
 @pytest.mark.cuda

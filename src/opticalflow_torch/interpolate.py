@@ -8,7 +8,7 @@ from collections.abc import Sequence
 import torch
 from torch import Tensor
 
-from ._ops import as_scalar, check_flow, check_frames
+from ._ops import as_scalar, check_flow, check_frames, no_autocast
 from .warp import warp
 
 _SMOOTHING = 0.25  # half-width of the box smoothing the blend's distribution function, in mean target quantile spacings
@@ -130,11 +130,13 @@ def _match_distribution(blend: Tensor, frame0: Tensor, frame1: Tensor, t: Tensor
     probability = _window_integral((offset - half).abs(), offset + half, width, knots, area) / (2 * half)
     # then through the target's quantile function, piecewise linear between the `target` knots
     position = probability.clamp(0, 1) * steps
-    lower = position.detach().floor().clamp(max=steps - 1)
+    # NaN (from non-finite inputs) would index out of bounds; it stays NaN through `position`
+    lower = position.detach().nan_to_num(0).floor().clamp(max=steps - 1)
     y0, y1 = target.gather(-1, lower.long()), target.gather(-1, lower.long() + 1)
     return (y0 + (position - lower) * (y1 - y0)).to(blend.dtype).view_as(blend)
 
 
+@no_autocast
 def interpolate_frames(
     frame0: Tensor,
     frame1: Tensor,
@@ -169,7 +171,8 @@ def interpolate_frames(
         smoothed over a quarter of the mean spacing of the target quantiles, then through the
         target's quantile function. The map is continuous, also where values of the blend tie,
         and keeps their order. The blend's minimum maps to the lowest target value, so dry areas
-        stay dry, and no value goes beyond the target's minimum and maximum.
+        stay dry, and no value goes beyond the target's minimum and maximum. A NaN or infinity
+        in the frames or flows makes most of its image NaN.
     quantiles : int
         Number of quantiles of the probability matching, at least 2, at probabilities
         ``k / (quantiles - 1)``. ``H * W`` comes close to rank matching.

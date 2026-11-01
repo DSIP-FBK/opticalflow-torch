@@ -15,8 +15,9 @@ with respect to their float parameters:
 | [`endpoint_error`][opticalflow_torch.metrics.endpoint_error], [`photometric_error`][opticalflow_torch.metrics.photometric_error], [`consistency`][opticalflow_torch.metrics.consistency], [`flow_to_rgb`][opticalflow_torch.visualize.flow_to_rgb] | their tensor inputs |
 
 Parameters typed `float | Tensor` accept tensors that require grad. Integer, string and boolean
-arguments (`levels`, `winsize`, `iterations`, `poly_n`, `window`, `quantiles`, ...) and
-`pyr_scale`, which sets the pyramid sizes, choose the computation and have no gradient.
+arguments (`levels`, `winsize`, `iterations`, `poly_n`, `window`, `quantiles`, ...),
+`pyr_scale`, which sets the pyramid sizes, and `data_range` choose the computation and have no
+gradient.
 
 There are no hard thresholds, argmax or data-dependent branches. The non-smooth points are kinks
 like those of bilinear interpolation: the gradient with respect to a sampling position changes
@@ -66,11 +67,12 @@ from opticalflow_torch import endpoint_error, farneback
 
 def motion(frames: torch.Tensor) -> torch.Tensor:
     """Flows between consecutive frames of (B, T, H, W) sequences, shape (B * (T - 1), 2, H, W)."""
-    return farneback(frames[:, :-1].flatten(0, 1).unsqueeze(1), frames[:, 1:].flatten(0, 1).unsqueeze(1))
+    frame0, frame1 = frames[:, :-1].flatten(0, 1).unsqueeze(1), frames[:, 1:].flatten(0, 1).unsqueeze(1)
+    return farneback(frame0, frame1, data_range=1.0)  # fields in [0, 1], see Conventions
 
 
 with torch.no_grad():
-    target = motion(observed)  # values scaled to about 0-255, see Conventions
+    target = motion(observed)
 loss = endpoint_error(motion(forecast), target).mean()  # gradients reach the forecast
 ```
 
@@ -79,9 +81,10 @@ loss = endpoint_error(motion(forecast), target).mean()  # gradients reach the fo
 **Flat regions and `eps`.** Where a window has no texture (no rain, a uniform background, or only
 a straight edge), the 2x2 system of the pixel is close to singular and the flow is set by `eps`
 rather than by the frames: Farneback's flow goes to zero there, Lucas-Kanade's comes from the
-coarser levels and the neighbouring pixels. `eps` decides how much contrast counts as texture, so scale it
-with the values (see [Value range](conventions.md#value-range)). To discount such pixels in a loss,
-weight them by the confidence output (`return_confidence=True`).
+coarser levels and the neighbouring pixels. `eps` decides how much contrast counts as texture,
+relative to `data_range`, so set `data_range` to the span of the values (see
+[Value range](conventions.md#value-range)). To discount such pixels in a loss, weight them by the
+confidence output (`return_confidence=True`).
 
 **Memory of the unrolled iterations.** Autograd keeps the intermediate tensors of every iteration
 at every pyramid level, so the memory of the backward pass grows with `iterations` and with the
@@ -100,10 +103,17 @@ gradient checks need float64. Use float64 where this matters.
 returns NaN, with zero gradient. The gradients of the other pixels are unaffected, but a loss
 summed over all pixels is NaN: reduce it with `torch.nansum` or `torch.nanmean`, or select the
 finite pixels first. NaNs in the frames spread through the filters of the flow methods, so fill
-missing values before estimating a flow.
+missing values before estimating a flow. In
+[`interpolate_frames`][opticalflow_torch.interpolate.interpolate_frames] with
+`match_distribution=True`, a NaN or infinity in the frames or flows makes most of its image NaN, as
+the distributions are per image.
 
 **Half precision.** [`warp`][opticalflow_torch.warp.warp],
 [`farneback`][opticalflow_torch.farneback.farneback] and
 [`lucas_kanade`][opticalflow_torch.lucas_kanade.lucas_kanade] compute float16 and bfloat16 inputs
 in float32 and return the input dtype: half precision cannot even represent sub-pixel positions on
-large images.
+large images. Inside `torch.autocast` regions the functions and modules compute as outside them, so
+a mixed precision training step (autocast with a `torch.amp.GradScaler`, `torch.cuda.amp.GradScaler`
+before PyTorch 2.3) can include them. They do not promote mixed dtypes as autocast does, though: the
+frames and flows of a call must share one dtype, and a model's float16 output gives a float16 flow.
+Cast it first, as in `endpoint_error(motion(forecast.float()), target)` for the example above.

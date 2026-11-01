@@ -34,7 +34,8 @@ A = \tfrac{1}{2}\bigl(A_0(\mathbf{x}) + A_1(\mathbf{x} + \tilde{\mathbf{d}})\big
 are averaged over a window around each pixel (a `winsize` box, or a Gaussian with
 `window="gaussian"`), which gives a 2x2 system \(G\, \mathbf{d} = \mathbf{h}\) per pixel, solved in
 closed form with `eps` added to the determinant:
-\(\mathbf{d} = \operatorname{adj}(G)\, \mathbf{h} / (\det G + \text{eps})\).
+\(\mathbf{d} = \operatorname{adj}(G)\, \mathbf{h} / (\det G + \text{eps})\). `eps` is given for
+frames spanning 0-255 and follows `data_range` for others (see [Value range](conventions.md#value-range)).
 
 **Iterations and pyramid.** The flow is re-estimated `iterations` times per level, each time from
 coefficients sampled with the latest flow. Levels go from the coarsest to the full resolution;
@@ -85,7 +86,8 @@ flow_np = flow[0].permute(1, 2, 0).numpy()  # (H, W, 2), like flow_cv
 | `flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN` | `window="gaussian"` | |
 | `flags=cv2.OPTFLOW_USE_INITIAL_FLOW` | pass `initial_flow` | |
 | fixed to `0.3 * (winsize // 2)` | `window_sigma` | Gaussian window only |
-| fixed to `1e-3` | `eps` | |
+| fixed to `1e-3` | `eps` | for frames spanning 0-255 |
+| | `data_range` | span of the frame values, 255 by default; see [Value range](conventions.md#value-range) |
 | | `return_confidence` | |
 
 `cv2.calcOpticalFlowFarneback` has no defaults. Those of `farneback` are the defaults of
@@ -117,7 +119,7 @@ As in OpenCV, coarser layers whose width or height would be below 32 pixels are 
 - **Precision.** OpenCV computes in float32. Here float64 frames are processed in float64, and
   float16 and bfloat16 frames in float32. Results in float32 differ from OpenCV's by round-off.
 - **Additions.** Batches, GPUs, gradients, `eps` and `window_sigma` as parameters (tensors
-  allowed), and the confidence output.
+  allowed), `data_range` for frames that do not span 0-255, and the confidence output.
 
 [^1]: G. Farnebäck, "Two-frame motion estimation based on polynomial expansion", Scandinavian
     Conference on Image Analysis (SCIA), 2003, LNCS 2749, pp. 363-370.

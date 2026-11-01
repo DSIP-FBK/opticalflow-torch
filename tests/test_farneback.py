@@ -460,6 +460,76 @@ def test_cpu_and_cuda_agree(window: str, dtype: torch.dtype) -> None:
 
 
 # ----------------------------------------------------------------------------------------------
+# Value range
+# ----------------------------------------------------------------------------------------------
+
+
+def range_pair(device: torch.device, dtype: torch.dtype = torch.float32) -> tuple[torch.Tensor, ...]:
+    """0-255 frames of a rotation and translation, 64x72, and the true flow."""
+    true = (rotation_flow(64, 72, 2.0) + translation_flow(64, 72, 1.5, -0.8)).to(device, dtype)
+    return (*make_pair(AnalyticTexture(5), true), true)
+
+
+@pytest.mark.parametrize("scale", [1e-3, 1 / 255, 1e4])
+def test_data_range_scales_with_the_frames(scale: float, device: torch.device, dtype: torch.dtype) -> None:
+    frame0, frame1, _ = range_pair(device, dtype)
+    weights = torch.randn(1, 2, 64, 72, device=device, dtype=dtype)
+    kwargs = dict(levels=1, iterations=3, window="gaussian", return_confidence=True)
+
+    def run(f0: torch.Tensor, f1: torch.Tensor, **extra: float) -> tuple[torch.Tensor, ...]:
+        f0 = f0.clone().requires_grad_()
+        flow, confidence = farneback(f0, f1, **kwargs, **extra)
+        return flow, confidence, *torch.autograd.grad((flow * weights).sum(), f0)
+
+    flow, confidence, grad = run(frame0, frame1)
+    default = run(frame0, frame1, data_range=255.0)
+    assert torch.equal(default[0], flow) and torch.equal(default[1], confidence)
+    # frames and data_range scaled alike: the same flow, the confidence times scale ** 2 and the
+    # gradients divided by scale. Measured: flows within 1e-5 px in float32 and 2e-14 px in float64,
+    # confidences and gradients within 3e-6 and 5e-15 of their largest values.
+    tol = 1e-4 if dtype == torch.float32 else 1e-10
+    out = run(scale * frame0, scale * frame1, data_range=255 * scale)
+    torch.testing.assert_close(out[0], flow, rtol=0, atol=tol)
+    torch.testing.assert_close(out[1] / scale**2, confidence, rtol=0, atol=tol * confidence.abs().max().item())
+    torch.testing.assert_close(out[2] * scale, grad, rtol=0, atol=tol * grad.abs().max().item())
+    # which is eps * (data_range / 255) ** 4 on the frames as given
+    rescaled_eps = farneback(scale * frame0, scale * frame1, eps=1e-3 * scale**4, **kwargs)[0]
+    torch.testing.assert_close(rescaled_eps, flow, rtol=0, atol=tol)
+
+
+def test_module_data_range(device: torch.device) -> None:
+    # eps is stored in units of 0-255 frames, so a learned value carries over to another data_range
+    frame0, frame1, true = range_pair(device)
+    kwargs = dict(levels=1, iterations=3, window="gaussian", learnable=True)
+    model = Farneback(**kwargs).to(device)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter += 0.5  # as if trained
+    unit = Farneback(data_range=1.0, **kwargs).to(device)
+    unit.load_state_dict(model.state_dict())
+    assert "data_range=255.0" in repr(model) and "data_range=1.0" in repr(unit)
+    outs = []
+    for m, scale in ((model, 1.0), (unit, 1 / 255)):
+        flow = m(scale * frame0, scale * frame1)
+        outs.append((flow, torch.autograd.grad((flow - true).norm(dim=1).mean(), list(m.parameters()))))
+    torch.testing.assert_close(outs[1][0], outs[0][0], rtol=0, atol=1e-4)
+    torch.testing.assert_close(outs[1][1], outs[0][1], rtol=1e-4, atol=0)
+
+
+def test_frames_in_0_1_need_their_data_range(device: torch.device) -> None:
+    # With the default data_range, eps outweighs the systems of frames in [0, 1] and the flow stays
+    # near zero, a visible failure, as in OpenCV. Measured: |flow| up to 1.4e-4 px (OpenCV's too) for
+    # motions up to 2.6 px; with data_range=1.0, mean error 0.073 px, as on the 0-255 frames.
+    frame0, frame1, true = range_pair(device)
+    unit0, unit1 = frame0 / 255, frame1 / 255
+    limit = 0.001 * true.abs().amax().item()
+    assert farneback(unit0, unit1).abs().amax().item() < limit
+    assert np.abs(cv_farneback(unit0, unit1, DEFAULTS)).max() < limit
+    error = (farneback(unit0, unit1, data_range=1.0) - true).norm(dim=1)[:, 12:-12, 12:-12]
+    assert error.mean().item() < 0.1
+
+
+# ----------------------------------------------------------------------------------------------
 # Confidence
 # ----------------------------------------------------------------------------------------------
 
@@ -592,6 +662,25 @@ def test_module_training_reduces_the_error() -> None:
     assert losses[-1] < 0.6 * losses[0]
 
 
+@pytest.mark.cuda
+def test_mixed_precision_training_step(grad_scaler: torch.amp.GradScaler) -> None:
+    # float32 frames inside autocast(float16), with a GradScaler. Under autocast, the float16
+    # convolutions used to give non-finite gradients, and the step was skipped.
+    true = rotation_flow(96, 112, 2.0, device="cuda") + translation_flow(96, 112, 1.5, -0.8, device="cuda")
+    frame0, frame1 = (frame.requires_grad_() for frame in make_pair(AnalyticTexture(5), true))
+    model = Farneback(window="gaussian", learnable=True).cuda()
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
+    with torch.autocast("cuda", dtype=torch.float16):
+        flow = model(frame0, frame1)
+        loss = (flow - true).norm(dim=1).mean()
+    grad_scaler.scale(loss).backward()
+    grad_scaler.step(optimizer)
+    grad_scaler.update()
+    assert flow.dtype == torch.float32 and flow.isfinite().all()
+    assert all(tensor.grad.isfinite().all() for tensor in (frame0, frame1, *model.parameters()))
+    assert grad_scaler.get_scale() == 2.0**16  # halved if the step had been skipped for non-finite gradients
+
+
 # ----------------------------------------------------------------------------------------------
 # Argument errors
 # ----------------------------------------------------------------------------------------------
@@ -619,6 +708,14 @@ def test_module_training_reduces_the_error() -> None:
         (dict(eps=-1.0), ValueError, "eps"),
         (dict(eps=0.0), ValueError, "eps must be positive"),
         (dict(eps=None), TypeError, "eps"),
+        (dict(data_range=0.0), ValueError, "data_range must be positive"),
+        (dict(data_range=-255), ValueError, "data_range must be positive"),
+        (dict(data_range=float("inf")), ValueError, "data_range must be finite"),
+        (dict(data_range=float("nan")), ValueError, "data_range must be finite"),
+        (dict(data_range="255"), TypeError, "data_range must be a float"),
+        (dict(data_range=None), TypeError, "data_range must be a float"),
+        (dict(data_range=True), TypeError, "data_range must be a float"),
+        (dict(data_range=torch.tensor(255.0)), TypeError, "data_range must be a float"),
     ],
 )
 def test_argument_errors(kwargs: dict, error: type[Exception], match: str) -> None:
@@ -652,6 +749,7 @@ def test_frame_and_flow_errors() -> None:
         (dict(learnable=True, poly_sigma=0.0), ValueError, "poly_sigma must be positive"),
         (dict(learnable=["eps"], eps=0.0), ValueError, "eps must be positive"),
         (dict(poly_sigma=torch.tensor(1.0)), TypeError, "poly_sigma must be a float"),
+        (dict(data_range=torch.tensor(1.0)), TypeError, "data_range must be a float"),
     ],
 )
 def test_module_errors(kwargs: dict, error: type[Exception], match: str) -> None:

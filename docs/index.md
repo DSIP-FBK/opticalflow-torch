@@ -57,6 +57,14 @@ aligned = warp(frame1, flow)  # close to frame0
 rgb = flow_to_rgb(flow)  # (1, 3, 128, 128) in [0, 1], for plotting
 ```
 
+The defaults assume frames spanning 0-255, as OpenCV's do. For other values, give their span as
+`data_range`. With the default, frames in [0, 1] get a Farneback flow of about zero, and
+Lucas-Kanade flows held back where the texture is weak, which is easy to miss:
+
+```python
+flow = farneback(frame0 / 255, frame1 / 255, data_range=1.0)  # frames in [0, 1], the same flow
+```
+
 Gradients go through the flow estimation:
 
 ```python
@@ -66,4 +74,4 @@ loss.backward()  # frame1.grad now holds d loss / d frame1
 ```
 
 Read [Conventions](conventions.md) first: it fixes the direction of the flow, the meaning of
-`warp`, and the value range the defaults expect.
+`warp`, and the [value range](conventions.md#value-range) the defaults expect.

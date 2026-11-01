@@ -15,6 +15,7 @@ from ._ops import (
     check_flow,
     check_frames,
     gaussian_kernel1d,
+    no_autocast,
     pyramid_level,
     pyramid_levels,
     resize,
@@ -72,6 +73,7 @@ def _check_options(
     window: str,
     window_sigma: float | Tensor | None,
     eps: float | Tensor,
+    data_range: float,
 ) -> tuple[float, int, int, int, int]:
     """Validate the options of :func:`farneback`; returns ``pyr_scale, levels, winsize, iterations, poly_n``."""
     _check_number(pyr_scale, "pyr_scale", tensor=False)
@@ -89,6 +91,7 @@ def _check_options(
             raise ValueError("window_sigma is only valid with window='gaussian'")
         _check_number(window_sigma, "window_sigma", tensor=True, positive=True)
     _check_number(eps, "eps", tensor=True, positive=True)
+    _check_number(data_range, "data_range", tensor=False, positive=True)
     return float(pyr_scale), levels, winsize, iterations, poly_n
 
 
@@ -244,6 +247,7 @@ def _min_eigenvalue(averaged: Tensor) -> Tensor:
 # ----------------------------------------------------------------------------------------------
 
 
+@no_autocast
 def farneback(
     frame0: Tensor,
     frame1: Tensor,
@@ -257,6 +261,7 @@ def farneback(
     window: Literal["box", "gaussian"] = "box",
     window_sigma: float | Tensor | None = None,
     eps: float | Tensor = 1e-3,
+    data_range: float = 255.0,
     initial_flow: Tensor | None = None,
     return_confidence: bool = False,
 ) -> Tensor | tuple[Tensor, Tensor]:
@@ -264,9 +269,10 @@ def farneback(
 
     A port of OpenCV's ``cv2.calcOpticalFlowFarneback``, differentiable with respect to
     both frames, ``initial_flow``, ``poly_sigma``, ``window_sigma`` and ``eps``. Defaults
-    are OpenCV's ``FarnebackOpticalFlow.create`` defaults. Values are used as given; like
-    OpenCV, the defaults assume intensities of roughly 0-255. Frames with several channels
-    sum their per-channel equations. float16 and bfloat16 frames are processed in float32.
+    are OpenCV's ``FarnebackOpticalFlow.create`` defaults, which assume frames spanning 0-255;
+    give ``data_range`` for others, e.g. ``data_range=1.0`` for frames in [0, 1]. Frames with
+    several channels sum their per-channel equations. float16 and bfloat16 frames are processed
+    in float32, and float32 frames stay in float32 inside :func:`torch.autocast`.
 
     Intended differences: OpenCV's test of whether a displaced position falls inside the image
     becomes a weight that varies linearly between integer positions, which keeps the flow
@@ -301,13 +307,20 @@ def farneback(
         Sigma of the Gaussian window, by default ``0.3 * (winsize // 2)`` as in OpenCV.
         Only valid with ``window="gaussian"``.
     eps : float or Tensor
-        Added to the determinant of each 2x2 system (OpenCV uses 1e-3). Must be positive:
-        with 0, flat regions give NaN.
+        Added to the determinant of each 2x2 system of frames spanning 0-255 (OpenCV uses
+        1e-3); for frames spanning ``data_range``, ``eps * (data_range / 255) ** 4``, as the
+        determinant scales with the fourth power of the values. Must be positive: with 0,
+        flat regions give NaN.
+    data_range : float
+        Span of the frame values, positive: 255 for 0-255 frames, 1.0 for frames in [0, 1].
+        Frames scaled together with it give the same flow. Too large a value shortens the
+        flow, to about zero for frames in [0, 1] left at 255.
     initial_flow : Tensor, optional
         Starting estimate, shape ``(B, 2, H, W)`` (OpenCV's ``OPTFLOW_USE_INITIAL_FLOW``).
     return_confidence : bool
         Also return the smallest eigenvalue of each pixel's averaged system at full
-        resolution, shape ``(B, H, W)``.
+        resolution, shape ``(B, H, W)``. It scales with the square of the frame values, not
+        with ``data_range``.
 
     Returns
     -------
@@ -316,14 +329,17 @@ def farneback(
     """
     check_frames(frame0, frame1)
     pyr_scale, levels, winsize, iterations, poly_n = _check_options(
-        pyr_scale, levels, winsize, iterations, poly_n, poly_sigma, window, window_sigma, eps
+        pyr_scale, levels, winsize, iterations, poly_n, poly_sigma, window, window_sigma, eps, data_range
     )
     if initial_flow is not None:
         check_flow(initial_flow, frame0, "initial_flow")
     dtype = frame0.dtype
     compute = torch.promote_types(dtype, torch.float32)
     batch, channels, height, width = frame0.shape
-    frames = torch.cat((frame0, frame1)).to(compute)
+    # In units of 0-255 frames, where eps applies: the same as eps * (data_range / 255) ** 4 on the
+    # frames as given, whose float32 gradients broke down from data_range 2.5e7 (1 / det ** 2 underflows).
+    scale = 255 / data_range
+    frames = torch.cat((frame0, frame1)).to(compute) * scale
     poly_kernels = _poly_kernels(poly_n, poly_sigma, frames)
     window_kernel = _window_kernel(window, winsize, window_sigma, frames)
     eps = as_scalar(eps, frames, "eps")
@@ -349,7 +365,7 @@ def farneback(
             if i < iterations - 1:
                 matrices = _update_matrices(r0, r1, flow, border_scale)
     if return_confidence:
-        return flow.to(dtype), _min_eigenvalue(averaged).to(dtype)
+        return flow.to(dtype), (_min_eigenvalue(averaged) / scale**2).to(dtype)
     return flow.to(dtype)
 
 
@@ -382,7 +398,9 @@ class Farneback(nn.Module):
     learnable : bool or iterable of str
         Parameters to register as :class:`torch.nn.Parameter`, among ``"poly_sigma"``,
         ``"window_sigma"`` (Gaussian window only) and ``"eps"``; ``True`` means all that
-        apply. They are stored as logarithms so they stay positive.
+        apply. They are stored as logarithms so they stay positive. ``eps`` stays in units of
+        0-255 frames, so a learned value carries over to another ``data_range``, which is not
+        learnable.
     """
 
     def __init__(
@@ -397,6 +415,7 @@ class Farneback(nn.Module):
         window: Literal["box", "gaussian"] = "box",
         window_sigma: float | None = None,
         eps: float = 1e-3,
+        data_range: float = 255.0,
         learnable: bool | Iterable[str] = False,
     ) -> None:
         super().__init__()
@@ -404,9 +423,10 @@ class Farneback(nn.Module):
             if value is not None:
                 _check_number(value, name, tensor=False)
         self.pyr_scale, self.levels, self.winsize, self.iterations, self.poly_n = _check_options(
-            pyr_scale, levels, winsize, iterations, poly_n, poly_sigma, window, window_sigma, eps
+            pyr_scale, levels, winsize, iterations, poly_n, poly_sigma, window, window_sigma, eps, data_range
         )
         self.window = window
+        self.data_range = float(data_range)
         names = _learnable_names(learnable, window, self.winsize)
         if window_sigma is None and "window_sigma" in names:
             window_sigma = 0.3 * (self.winsize // 2)
@@ -439,6 +459,7 @@ class Farneback(nn.Module):
         """Current ``eps``, a tensor if learnable."""
         return self._value("eps")
 
+    @no_autocast
     def forward(
         self,
         frame0: Tensor,
@@ -459,6 +480,7 @@ class Farneback(nn.Module):
             window=self.window,
             window_sigma=self.window_sigma,
             eps=self.eps,
+            data_range=self.data_range,
             initial_flow=initial_flow,
             return_confidence=return_confidence,
         )
@@ -473,6 +495,7 @@ class Farneback(nn.Module):
             f"window={self.window!r}",
         ]
         fields += [f"{name}={value}" for name, value in self._fixed.items() if value is not None]
+        fields.append(f"data_range={self.data_range}")
         learnable = [name for name in _LEARNABLE if name not in self._fixed]
         if learnable:
             fields.append(f"learnable={learnable}")

@@ -7,7 +7,7 @@ from typing import Literal
 import torch
 from torch import Tensor
 
-from ._ops import as_scalar, check_flow, check_frames
+from ._ops import as_scalar, check_flow, check_frames, no_autocast
 from .warp import warp
 
 
@@ -21,6 +21,7 @@ def _length(vectors: Tensor) -> Tensor:
     return torch.where(nonzero, torch.where(nonzero, square, 1).sqrt(), 0)
 
 
+@no_autocast
 def endpoint_error(flow: Tensor, reference: Tensor) -> Tensor:
     """Length of the difference between two flows, per pixel.
 
@@ -42,6 +43,7 @@ def endpoint_error(flow: Tensor, reference: Tensor) -> Tensor:
     return _length(flow - reference)
 
 
+@no_autocast
 def photometric_error(
     frame0: Tensor,
     frame1: Tensor,
@@ -70,6 +72,7 @@ def photometric_error(
     return (warp(frame1, flow, padding_mode=padding_mode) - frame0).abs()
 
 
+@no_autocast
 def consistency(
     forward_flow: Tensor,
     backward_flow: Tensor,

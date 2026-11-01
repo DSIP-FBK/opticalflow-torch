@@ -45,8 +45,15 @@ aligned = warp(frame1, flow)  # close to frame0
 ```
 
 Frames are `(B, C, H, W)` tensors and flows `(B, 2, H, W)`, with
-`frame0[y, x] ≈ frame1[y + flow_y, x + flow_x]` as in OpenCV. Like OpenCV, the defaults assume
-values of roughly 0-255.
+`frame0[y, x] ≈ frame1[y + flow_y, x + flow_x]` as in OpenCV. The defaults assume frames spanning
+0-255, as OpenCV's do; for other values, give their span as `data_range`:
+
+```python
+flow = farneback(frame0 / 255, frame1 / 255, data_range=1.0)  # frames in [0, 1], the same flow
+```
+
+With the default `data_range`, frames in [0, 1] get a Farneback flow of about zero, and
+Lucas-Kanade flows held back where the texture is weak, which is easy to miss.
 
 ## Documentation
 

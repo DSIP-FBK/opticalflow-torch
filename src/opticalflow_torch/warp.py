@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from ._ops import check_flow, check_image, check_size, pad_border
+from ._ops import check_flow, check_image, check_size, no_autocast, pad_border
 
 _WARP_MODES = ("bilinear", "nearest", "bicubic")
 _PADDING_MODES = ("border", "zeros", "reflection")
@@ -32,6 +32,7 @@ def _reflect(coord: Tensor, size: int) -> Tensor:
     return last - (torch.remainder(coord, 2 * last) - last).abs()
 
 
+@no_autocast
 def warp(
     image: Tensor,
     flow: Tensor,
@@ -94,6 +95,7 @@ def warp(
     return torch.where(bad, torch.nan, out).to(dtype)
 
 
+@no_autocast
 def resize_flow(
     flow: Tensor,
     size: tuple[int, int],

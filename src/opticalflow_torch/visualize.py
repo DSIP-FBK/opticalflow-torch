@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
-from ._ops import as_scalar, check_flow
+from ._ops import as_scalar, check_flow, no_autocast
 from .metrics import _length
 
 
@@ -33,6 +33,7 @@ def _colour_wheel() -> tuple[tuple[float, float, float], ...]:
 _WHEEL = _colour_wheel()
 
 
+@no_autocast
 def flow_to_rgb(flow: Tensor, *, max_magnitude: float | Tensor | None = None) -> Tensor:
     """Colour-code a flow with the standard optical flow colour wheel (Baker et al., 2011).
 
