@@ -231,9 +231,11 @@ def _min_eigenvalue(averaged: Tensor) -> Tensor:
     """Smallest eigenvalue of the symmetric systems ``(g11, g12, g22)`` in ``averaged``, shape ``(B, H, W)``."""
     g11, g12, g22 = averaged[:, 0], averaged[:, 1], averaged[:, 2]
     # The radius sqrt(r2) has unbounded derivatives at r2 = 0, which flat regions reach exactly;
-    # sqrt(r2 + c) - sqrt(c) has bounded ones and is within sqrt(c) (3e-10 in float32) of it.
+    # sqrt(r2 + c) - sqrt(c) has bounded ones and is within sqrt(c) (3e-10 in float32) of it. Written
+    # without the subtraction, it is exactly 0 at r2 = 0 however sqrt rounds (AVX-512 differs).
     c = torch.finfo(averaged.dtype).tiny ** 0.5
-    radius = (((g11 - g22) * 0.5).square() + g12.square() + c).sqrt() - math.sqrt(c)
+    r2 = ((g11 - g22) * 0.5).square() + g12.square()
+    radius = r2 / ((r2 + c).sqrt() + math.sqrt(c))
     return (g11 + g22) * 0.5 - radius
 
 
