@@ -1,0 +1,7 @@
+opticalflow-torch
+Copyright 2026 Fondazione Bruno Kessler (FBK)
+
+This product includes software derived from OpenCV (https://opencv.org),
+licensed under the Apache License, Version 2.0. The Farneback implementation in
+src/opticalflow_torch/farneback.py is a port of OpenCV's
+modules/video/src/optflowgf.cpp.

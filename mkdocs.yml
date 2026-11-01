@@ -1,0 +1,105 @@
+site_name: opticalflow-torch
+site_description: Differentiable optical flow (Farneback, Lucas-Kanade) in pure PyTorch
+site_url: https://dsip-fbk.github.io/opticalflow-torch/
+repo_url: https://github.com/DSIP-FBK/opticalflow-torch
+repo_name: DSIP-FBK/opticalflow-torch
+edit_uri: edit/main/docs/
+copyright: Copyright 2026 Fondazione Bruno Kessler (FBK). Apache License 2.0.
+
+nav:
+  - Home: index.md
+  - Conventions: conventions.md
+  - Farneback: farneback.md
+  - Lucas-Kanade: lucas-kanade.md
+  - Interpolation: interpolation.md
+  - Differentiability: differentiability.md
+  - API reference: api.md
+  - Changelog: changelog.md
+
+exclude_docs: |
+  /_scripts/
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+watch:
+  - src
+  - CHANGELOG.md
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.footer
+    - navigation.top
+    - search.highlight
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      check_paths: true
+  - pymdownx.superfences
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          inventories:
+            - https://docs.python.org/3/objects.inv
+            - https://docs.pytorch.org/docs/stable/objects.inv
+          options:
+            extensions:
+              - docs/_scripts/sphinx_roles.py
+            docstring_style: numpy
+            docstring_section_style: table
+            filters: ["!^_"]
+            heading_level: 3
+            members_order: source
+            merge_init_into_class: true
+            separate_signature: true
+            show_root_full_path: false
+            show_root_heading: true
+            show_signature_annotations: true
+            show_source: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            signature_crossrefs: true

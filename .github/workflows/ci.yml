@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.11.x"
+      # --locked also fails if uv.lock is out of date with pyproject.toml
+      - name: Ruff check
+        run: uv run --locked --only-group dev ruff check .
+      - name: Ruff format
+        run: uv run --locked --only-group dev ruff format --check .
+
+  test:
+    name: test (Python ${{ matrix.python-version }}, ${{ matrix.resolution }} versions)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+        resolution: [highest]
+        include:
+          # the lowest versions that pyproject.toml allows; with torch 2.2 the torch.compile tests are skipped
+          - python-version: "3.10"
+            resolution: lowest-direct
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.11.x"
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
+      # uv.lock takes torch from PyPI, whose Linux wheels pull in the CUDA libraries. uv's pip
+      # interface can take CPU-only torch from the PyTorch index instead, without the lock.
+      - name: Install
+        env:
+          RESOLUTION: ${{ matrix.resolution }}
+        run: uv pip install --torch-backend cpu --resolution "$RESOLUTION" --editable . --group dev
+      - name: Test
+        run: pytest

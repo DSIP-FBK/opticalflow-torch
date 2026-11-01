@@ -1,0 +1,64 @@
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12"]
+build-backend = "uv_build"
+
+[project]
+name = "opticalflow-torch"
+version = "0.1.0.dev0"
+description = "Differentiable optical flow (Farneback, Lucas-Kanade) in pure PyTorch"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Gabriele Franch", email = "franch@fbk.eu" }]
+requires-python = ">=3.10"
+keywords = ["optical flow", "pytorch", "farneback", "lucas-kanade", "differentiable", "radar", "nowcasting"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Image Processing",
+  "Topic :: Scientific/Engineering :: Atmospheric Science",
+  "Typing :: Typed",
+]
+dependencies = ["torch>=2.2"]
+
+[project.urls]
+Homepage = "https://github.com/DSIP-FBK/opticalflow-torch"
+Issues = "https://github.com/DSIP-FBK/opticalflow-torch/issues"
+
+[dependency-groups]
+dev = [
+  "numpy>=1.24",
+  "opencv-python-headless>=4.8",
+  "pytest>=8",
+  "ruff>=0.6",
+]
+docs = [
+  "mkdocs-material>=9.5",
+  "mkdocstrings[python]>=0.26",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+  "A",  # flake8-builtins
+  "B",  # flake8-bugbear
+  "E",  # pycodestyle errors
+  "F",  # pyflakes
+  "I",  # isort
+  "UP", # pyupgrade
+  "W",  # pycodestyle warnings
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+  "cuda: needs a CUDA device",
+  "slow: takes more than a few seconds",
+]
