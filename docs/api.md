@@ -3,6 +3,14 @@
 Everything below is importable from the top-level package, e.g.
 `from opticalflow_torch import farneback`.
 
+## High-level API
+
+::: opticalflow_torch.highlevel.optical_flow
+
+::: opticalflow_torch.highlevel.interpolate
+
+::: opticalflow_torch.highlevel.OpticalFlow
+
 ## Flow estimation
 
 ::: opticalflow_torch.farneback.farneback

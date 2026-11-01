@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `optical_flow`, `interpolate` and the `OpticalFlow` module: one entry point for both methods,
+  chosen with `method="farneback"` or `"lucas_kanade"`; `interpolate` computes the flow and the
+  frames in between, e.g. `steps=2` for two frames at times 1/3 and 2/3.
 - `farneback` and the `Farneback` module: Farneback dense optical flow ported from OpenCV's
   `calcOpticalFlowFarneback`, with OpenCV's parameter names and image pyramid, the defaults of
   `FarnebackOpticalFlow.create`, a box or Gaussian window, an initial flow, and an optional

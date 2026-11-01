@@ -12,6 +12,7 @@ with respect to their float parameters:
 | [`warp`][opticalflow_torch.warp.warp] | `image`, `flow` |
 | [`resize_flow`][opticalflow_torch.warp.resize_flow] | `flow` |
 | [`interpolate_frames`][opticalflow_torch.interpolate.interpolate_frames] | `frame0`, `frame1`, `flow`, `backward_flow`, `t` (as a tensor) |
+| [`optical_flow`][opticalflow_torch.highlevel.optical_flow], [`interpolate`][opticalflow_torch.highlevel.interpolate], [`OpticalFlow`][opticalflow_torch.highlevel.OpticalFlow] | as the method and the interpolation they call |
 | [`endpoint_error`][opticalflow_torch.metrics.endpoint_error], [`photometric_error`][opticalflow_torch.metrics.photometric_error], [`consistency`][opticalflow_torch.metrics.consistency], [`flow_to_rgb`][opticalflow_torch.visualize.flow_to_rgb] | their tensor inputs |
 
 Parameters typed `float | Tensor` accept tensors that require grad. Integer, string and boolean
@@ -51,7 +52,8 @@ for frame0, frame1, reference in loader:  # frames and reference flows
 
 The parameters are stored as logarithms, so they stay positive and an optimiser step changes them
 by a factor rather than an amount; the properties `poly_sigma`, `window_sigma` and `eps` give
-their current values. Without reference flows, minimise
+their current values. [`OpticalFlow`][opticalflow_torch.highlevel.OpticalFlow] holds one of them
+as `estimator`, e.g. `of.estimator.eps`. Without reference flows, minimise
 [`photometric_error`][opticalflow_torch.metrics.photometric_error] instead.
 
 ## Flow inside a loss

@@ -14,13 +14,16 @@ import opticalflow_torch
 from opticalflow_torch import (
     Farneback,
     LucasKanade,
+    OpticalFlow,
     _ops,
     consistency,
     endpoint_error,
     farneback,
     flow_to_rgb,
+    interpolate,
     interpolate_frames,
     lucas_kanade,
+    optical_flow,
     photometric_error,
     resize_flow,
     warp,
@@ -518,12 +521,21 @@ def public_calls(device: str) -> dict[str, Callable[[], object]]:
     return {
         "Farneback": lambda: Farneback(window="gaussian", **options).to(device)(frame0, frame1, 0.5 * flow, True),
         "LucasKanade": lambda: LucasKanade(window="box", **options).to(device)(frame0, frame1, 0.5 * flow, True),
+        "OpticalFlow": lambda: (
+            OpticalFlow("lucas_kanade", **options)
+            .to(device)
+            .interpolate(frame0, frame1, steps=2, bidirectional=True, match_distribution=True)
+        ),
         "consistency": lambda: consistency(flow, 0.1 - flow),
         "endpoint_error": lambda: endpoint_error(flow, 0.9 * flow),
         "farneback": lambda: farneback(frame0, frame1, return_confidence=True),
         "flow_to_rgb": lambda: flow_to_rgb(flow),
+        "interpolate": lambda: interpolate(
+            frame0, frame1, t=[0.3, 0.7], levels=1, iterations=3, match_distribution=True
+        ),
         "interpolate_frames": lambda: interpolate_frames(frame0, frame1, flow, [0.3, 0.7], match_distribution=True),
         "lucas_kanade": lambda: lucas_kanade(frame0, frame1, return_confidence=True),
+        "optical_flow": lambda: optical_flow(frame0, frame1, method="lucas_kanade", return_confidence=True),
         "photometric_error": lambda: photometric_error(frame0, frame1, flow),
         "resize_flow": lambda: resize_flow(flow, (40, 90), mode="bicubic"),
         "warp": lambda: warp(frame1, flow, mode="bicubic"),

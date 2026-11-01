@@ -4,6 +4,23 @@
 `frame0` (time 0) and `frame1` (time 1) by moving both along the flow, instead of blending them in
 place.
 
+## With or without a flow
+
+[`interpolate`][opticalflow_torch.highlevel.interpolate] computes the flow with the chosen method
+and then calls `interpolate_frames`;
+[`OpticalFlow.interpolate`][opticalflow_torch.highlevel.OpticalFlow.interpolate] does the same with
+the module's flow, so its learnable parameters get gradients. They take `steps`, the number of frames
+in between, at times \(k / (\text{steps} + 1)\), or any times `t`; `bidirectional=True` also
+computes the flow from `frame1` to `frame0` and uses it as `backward_flow`. Call `interpolate_frames`
+yourself when you already have the flow, for instance from another method or reused across calls.
+
+```python
+frames = interpolate(frame0, frame1, steps=2, data_range=60)  # 15-minute frames to 5-minute ones
+# the same as
+flow = farneback(frame0, frame1, data_range=60)
+frames = interpolate_frames(frame0, frame1, flow, [1 / 3, 2 / 3])
+```
+
 ## Advection correction
 
 Radar images come every few minutes. Rain summed from them shows stripes or separate blobs where

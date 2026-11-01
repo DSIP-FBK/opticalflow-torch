@@ -8,6 +8,7 @@ pixels (channel 0 is x, channel 1 is y) such that
 from importlib.metadata import PackageNotFoundError, version
 
 from .farneback import Farneback, farneback
+from .highlevel import OpticalFlow, interpolate, optical_flow
 from .interpolate import interpolate_frames
 from .lucas_kanade import LucasKanade, lucas_kanade
 from .metrics import consistency, endpoint_error, photometric_error
@@ -22,12 +23,15 @@ except PackageNotFoundError:  # running from a source tree without installation
 __all__ = [
     "Farneback",
     "LucasKanade",
+    "OpticalFlow",
     "consistency",
     "endpoint_error",
     "farneback",
     "flow_to_rgb",
+    "interpolate",
     "interpolate_frames",
     "lucas_kanade",
+    "optical_flow",
     "photometric_error",
     "resize_flow",
     "warp",
