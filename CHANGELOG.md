@@ -35,5 +35,8 @@ All notable changes to this project are documented here. The format follows
 - Every function and module gives the same results inside and outside `torch.autocast`: autocast
   is turned off while it runs, so mixed precision training does not push its convolutions to
   float16 or bfloat16, where squared gradients of 0-255 frames overflow.
+- Benchmarks against OpenCV in `benchmarks/` (`speed.py`: run times and CUDA memory; `accuracy.py`:
+  errors on synthetic pairs, distance to `cv2.calcOpticalFlowFarneback` and frame interpolation
+  on OPERA radar composites), with the results on a documentation page.
 
 [Unreleased]: https://github.com/DSIP-FBK/opticalflow-torch/commits/main/

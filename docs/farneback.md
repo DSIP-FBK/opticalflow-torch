@@ -118,7 +118,8 @@ As in OpenCV, coarser layers whose width or height would be below 32 pixels are 
   channels, whose equations are summed into one flow per image; with one channel nothing changes.
 - **Precision.** OpenCV computes in float32. Here float64 frames are processed in float64, and
   float16 and bfloat16 frames in float32. Results in float32 differ from OpenCV's by round-off.
-- **Additions.** Batches, GPUs, gradients, `eps` and `window_sigma` as parameters (tensors
+- **Additions.** Batches, any PyTorch device (OpenCV's own GPU path is OpenCL, taken with
+  `cv2.UMat` inputs), gradients, `eps` and `window_sigma` as parameters (tensors
   allowed), `data_range` for frames that do not span 0-255, and the confidence output.
 
 [^1]: G. Farnebäck, "Two-frame motion estimation based on polynomial expansion", Scandinavian

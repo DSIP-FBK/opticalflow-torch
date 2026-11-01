@@ -14,10 +14,11 @@ Differentiable optical flow in pure PyTorch.
 
 Classical optical flow is often needed inside PyTorch code: as a loss term, as an input feature,
 or to align and interpolate frames. The usual implementations (OpenCV, scikit-image, pysteps) work
-on NumPy arrays, one image at a time on the CPU, and cut the gradient. Here every function takes
-batched tensors on the CPU or a GPU and is [differentiable](differentiability.md) with respect to
-the frames, the flows and the float parameters, so gradients reach whatever produced the frames.
-The only runtime dependency is PyTorch.
+one image at a time, mostly on the CPU (OpenCV can use a GPU through OpenCL), and cut the
+gradient. Here every function takes batched tensors on the CPU or a GPU and is
+[differentiable](differentiability.md) with respect to the frames, the flows and the float
+parameters, so gradients reach whatever produced the frames. The only runtime dependency is
+PyTorch.
 
 ## Install
 

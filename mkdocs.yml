@@ -13,6 +13,7 @@ nav:
   - Lucas-Kanade: lucas-kanade.md
   - Interpolation: interpolation.md
   - Differentiability: differentiability.md
+  - Benchmarks: benchmarks.md
   - API reference: api.md
   - Changelog: changelog.md
 

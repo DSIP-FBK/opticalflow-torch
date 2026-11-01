@@ -67,7 +67,8 @@ where the texture is weak, which is easy to miss.
 ## Documentation
 
 <https://dsip-fbk.github.io/opticalflow-torch/>: conventions, the Farneback port and how it
-differs from OpenCV, Lucas-Kanade, interpolation, differentiability and the API reference.
+differs from OpenCV, Lucas-Kanade, interpolation, differentiability, benchmarks against OpenCV
+and the API reference.
 
 ## License
 
