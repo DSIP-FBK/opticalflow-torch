@@ -248,7 +248,8 @@ def cv_gaussian_kernel(
         inv = 1.0 / (sum(tail) * 2 + 1.0)
         tail = [t * inv for t in tail]
         values = [*tail, inv, *tail[::-1]]
-    return torch.tensor(values, dtype=dtype, device=device)
+    # built on the CPU: a copy without non_blocking would wait for the device to finish its queue
+    return torch.tensor(values, dtype=dtype).to(device, non_blocking=True)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -342,14 +343,16 @@ def separable_filter(
     check_image(x, "x")
     _check_border(border)
     channels = x.shape[1]
-    if kernel_x is not None:
-        weight = _depthwise_weight(kernel_x, channels, x, "kernel_x").unsqueeze(2)  # (C, 1, 1, k)
-        r = weight.shape[-1] // 2
-        x = F.conv2d(pad_border(x, (r, r, 0, 0), border), weight, groups=channels)
-    if kernel_y is not None:
-        weight = _depthwise_weight(kernel_y, channels, x, "kernel_y").unsqueeze(3)  # (C, 1, k, 1)
-        r = weight.shape[-2] // 2
-        x = F.conv2d(pad_border(x, (0, 0, r, r), border), weight, groups=channels)
+    weight_x = None if kernel_x is None else _depthwise_weight(kernel_x, channels, x, "kernel_x").unsqueeze(2)
+    weight_y = None if kernel_y is None else _depthwise_weight(kernel_y, channels, x, "kernel_y").unsqueeze(3)
+    rx = 0 if weight_x is None else weight_x.shape[-1] // 2
+    ry = 0 if weight_y is None else weight_y.shape[-2] // 2
+    # padded once for both passes: filtering along one axis commutes with padding along the other
+    x = pad_border(x, (rx, rx, ry, ry), border)
+    if weight_x is not None:
+        x = F.conv2d(x, weight_x, groups=channels)  # (C, 1, 1, k)
+    if weight_y is not None:
+        x = F.conv2d(x, weight_y, groups=channels)  # (C, 1, k, 1)
     return x
 
 

@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from typing import Literal
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ._ops import (
@@ -16,6 +17,7 @@ from ._ops import (
     check_frames,
     gaussian_kernel1d,
     no_autocast,
+    pad_border,
     pyramid_level,
     pyramid_levels,
     resize,
@@ -134,13 +136,17 @@ def _poly_kernels(n: int, sigma: float | Tensor, like: Tensor) -> tuple[Tensor, 
 def _poly_exp(image: Tensor, kernels: tuple[Tensor, Tensor]) -> Tensor:
     """FarnebackPolyExp of ``(N, 1, H, W)`` images: coefficients ``(ry, rx, ryy, rxx, rxy)``, shape ``(N, 5, H, W)``."""
     vertical, horizontal = kernels
-    columns = separable_filter(image.expand(-1, 3, -1, -1), None, vertical, border="replicate")
-    return separable_filter(columns[:, [1, 0, 2, 0, 1]], horizontal, None, border="replicate")
+    n = vertical.shape[-1] // 2
+    # each coefficient's own vertical pass (indexing the 3 columns with a list would sync with the device)
+    vertical = torch.stack([vertical[i] for i in (1, 0, 2, 0, 1)])
+    padded = pad_border(image.expand(-1, 5, -1, -1), (n, n, n, n), "replicate")
+    columns = F.conv2d(padded, vertical.reshape(5, 1, -1, 1), groups=5)
+    return F.conv2d(columns, horizontal.reshape(5, 1, 1, -1), groups=5)
 
 
 def _border_scale(height: int, width: int, like: Tensor) -> Tensor:
     """FarnebackUpdateMatrices' weights of the pixels near the borders, shape ``(H, W)``."""
-    weights = torch.tensor(_BORDER_WEIGHTS, dtype=torch.float32, device=like.device)
+    weights = torch.tensor(_BORDER_WEIGHTS, dtype=torch.float32).to(like.device, non_blocking=True)
 
     def axis(n: int) -> tuple[Tensor, Tensor, Tensor]:
         i = torch.arange(n, device=like.device)
@@ -167,48 +173,55 @@ def _index(coord: Tensor, size: int) -> Tensor:
     return torch.nan_to_num(coord, nan=0.0).clamp(0, size - 1).long()
 
 
-def _update_matrices(r0: Tensor, r1: Tensor, flow: Tensor, border_scale: Tensor) -> Tensor:
+def _update_matrices(r0: Tensor, r1: tuple[Tensor, Tensor], flow: Tensor, scale: Tensor) -> Tensor:
     """FarnebackUpdateMatrices: each pixel's ``(g11, g12, g22, h1, h2)``, summed over channels.
 
-    ``r0`` and ``r1`` are ``(B, C, 5, H, W)`` coefficients, ``flow`` is ``(B, 2, H, W)``.
-    Returns shape ``(B, 5, H, W)``. Where OpenCV switches between the bilinear sample of ``r1``
-    at the displaced position and a fallback on ``r0``, this blends the two with
-    :func:`_inside`, so it equals OpenCV wherever that weight is 0 or 1.
+    ``r0`` holds ``(B, C, 5, H, W)`` coefficients, ``rxy`` halved; ``r1`` is from :func:`_prepare`,
+    ``flow`` is ``(B, 2, H, W)`` and ``scale`` is half the border weights. Returns shape
+    ``(B, 5, H, W)``. Where OpenCV switches between the bilinear sample of ``r1`` at the displaced
+    position and a fallback on ``r0``, this blends the two with :func:`_inside`, so it equals
+    OpenCV wherever that weight is 0 or 1.
     """
     batch, channels, _, height, width = r0.shape
+    padded, fallback = r1
     dx, dy = flow[:, 0], flow[:, 1]
     fx = torch.arange(width, dtype=flow.dtype, device=flow.device) + dx
     fy = torch.arange(height, dtype=flow.dtype, device=flow.device).unsqueeze(-1) + dy
     x0, y0 = fx.floor(), fy.floor()
     ax, ay = (fx - x0).reshape(batch, 1, -1), (fy - y0).reshape(batch, 1, -1)
-    xa, xb = _index(x0, width), _index(x0 + 1, width)
-    ya, yb = _index(y0, height) * width, _index(y0 + 1, height) * width
-    flat = r1.reshape(batch, channels * 5, height * width)
+    # top-left tap in r1 padded by a replicated pixel: clamped to [0, size], all 4 taps read OpenCV's clamped ones
+    stride = width + 2
+    top = torch.add(_index(x0 + 1, width + 1), _index(y0 + 1, height + 1), alpha=stride).reshape(batch, 1, -1)
 
-    def tap(index: Tensor) -> Tensor:
-        return flat.gather(2, index.reshape(batch, 1, -1).expand(-1, flat.shape[1], -1))
+    def tap(offset: int) -> Tensor:
+        return padded.gather(2, (top + offset if offset else top).expand(-1, padded.shape[1], -1))
 
-    sample = (
-        (1 - ax) * (1 - ay) * tap(ya + xa)
-        + ax * (1 - ay) * tap(ya + xb)
-        + (1 - ax) * ay * tap(yb + xa)
-        + ax * ay * tap(yb + xb)
-    )
-    s0, s1, s2, s3, s4 = sample.reshape(batch, channels, 5, height, width).unbind(2)
-    q0, q1, q2, q3, q4 = r0.unbind(2)
-    valid = (_inside(fx, width) * _inside(fy, height)).unsqueeze(1)
-    # outside, OpenCV takes 0 for r1's linear coefficients and r0's for the quadratic ones
-    r2 = (q0 - valid * s0) * 0.5
-    r3 = (q1 - valid * s1) * 0.5
-    r4 = (q2 + (valid * s2 + (1 - valid) * q2)) * 0.5
-    r5 = (q3 + (valid * s3 + (1 - valid) * q3)) * 0.5
-    r6 = (q4 + (valid * s4 + (1 - valid) * q4)) * 0.25
+    bx, by = 1 - ax, 1 - ay
+    sample = bx * by * tap(0) + ax * by * tap(1) + bx * ay * tap(stride) + ax * ay * tap(stride + 1)
+    sample = sample.reshape(batch, channels, 5, height, width)
+    valid = (_inside(fx, width) * _inside(fy, height)).reshape(batch, 1, 1, height, width)
+    # doubled coefficients; outside, OpenCV takes 0 for r1's linear ones and r0's for the quadratic ones
+    zeros_linear, sign = fallback
+    r2, r3, r4, r5, r6 = torch.addcmul(r0, torch.lerp(zeros_linear, sample, valid), sign).unbind(2)
     dx, dy = dx.unsqueeze(1), dy.unsqueeze(1)
-    r2 = (r2 + (r4 * dy + r6 * dx)) * border_scale
-    r3 = (r3 + (r6 * dy + r5 * dx)) * border_scale
-    r4, r5, r6 = r4 * border_scale, r5 * border_scale, r6 * border_scale
-    matrices = (r4 * r4 + r6 * r6, (r4 + r5) * r6, r5 * r5 + r6 * r6, r4 * r2 + r6 * r3, r6 * r2 + r5 * r3)
-    return torch.stack(matrices, dim=1).sum(2)
+    r2 = (r2 + (r4 * dy + r6 * dx)) * scale
+    r3 = (r3 + (r6 * dy + r5 * dx)) * scale
+    r4, r5, r6 = r4 * scale, r5 * scale, r6 * scale
+    r66 = r6 * r6
+    matrices = (r4 * r4 + r66, (r4 + r5) * r6, r5 * r5 + r66, r4 * r2 + r6 * r3, r6 * r2 + r5 * r3)
+    return torch.cat(matrices, 1) if channels == 1 else torch.stack(matrices, dim=1).sum(2)
+
+
+def _prepare(r0: Tensor, r1: Tensor) -> tuple[Tensor, tuple[Tensor, Tensor]]:
+    """Per-level inputs of :func:`_update_matrices` from ``(B, C, 5, H, W)`` coefficients.
+
+    Returns ``r1`` padded by a replicated pixel, flattened to ``(B, 5C, (H + 2) (W + 2))``, and
+    ``r0`` with zeroed linear coefficients and the signs that combine it with the sample.
+    """
+    batch, channels, _, height, width = r1.shape
+    padded = pad_border(r1.reshape(batch, channels * 5, height, width), (1, 1, 1, 1), "replicate")
+    sign = torch.tensor([-1.0, -1.0, 1.0, 1.0, 1.0], dtype=r0.dtype).to(r0.device, non_blocking=True).reshape(5, 1, 1)
+    return padded.reshape(batch, channels * 5, -1), (r0 * (sign > 0), sign)
 
 
 def _window_kernel(window: str, winsize: int, window_sigma: float | Tensor | None, like: Tensor) -> Tensor:
@@ -340,7 +353,9 @@ def farneback(
     # frames as given, whose float32 gradients broke down from data_range 2.5e7 (1 / det ** 2 underflows).
     scale = 255 / data_range
     frames = torch.cat((frame0, frame1)).to(compute) * scale
-    poly_kernels = _poly_kernels(poly_n, poly_sigma, frames)
+    vertical, horizontal = _poly_kernels(poly_n, poly_sigma, frames)
+    # rxy halved, exactly, as FarnebackUpdateMatrices uses it; scale = border weights / 2 halves the rest
+    poly_kernels = (vertical, torch.cat((horizontal[:4], horizontal[4:] * 0.5)))
     window_kernel = _window_kernel(window, winsize, window_sigma, frames)
     eps = as_scalar(eps, frames, "eps")
 
@@ -357,7 +372,8 @@ def farneback(
             flow = resize(flow, size, "area") * level.scale
         images = pyramid_level(frames, level).reshape(2 * batch * channels, 1, *size)
         r0, r1 = _poly_exp(images, poly_kernels).reshape(2, batch, channels, 5, *size).unbind(0)
-        border_scale = _border_scale(*size, frames)
+        border_scale = _border_scale(*size, frames) * 0.5
+        r1 = _prepare(r0, r1)
         matrices = _update_matrices(r0, r1, flow, border_scale)
         for i in range(iterations):
             averaged = separable_filter(matrices, window_kernel, window_kernel, border="replicate")

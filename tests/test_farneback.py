@@ -552,8 +552,10 @@ def test_confidence_is_the_smallest_eigenvalue_of_the_averaged_system() -> None:
     _, confidence = farneback(frame0, frame1, iterations=2, return_confidence=True, **kwargs)
     # the system of the last iteration, built at the flow of the first one
     images = pyramid_level(torch.cat((frame0, frame1)), pyramid_levels(*PARITY_SIZE, 0.5, 0)[0])
-    r = fb._poly_exp(images, fb._poly_kernels(5, 1.1, frame0))
-    matrices = fb._update_matrices(r[:1, None], r[1:, None], first, fb._border_scale(*PARITY_SIZE, frame0))
+    vertical, horizontal = fb._poly_kernels(5, 1.1, frame0)
+    r = fb._poly_exp(images, (vertical, torch.cat((horizontal[:4], horizontal[4:] * 0.5))))
+    r0, r1 = r[:1, None], r[1:, None]
+    matrices = fb._update_matrices(r0, fb._prepare(r0, r1), first, fb._border_scale(*PARITY_SIZE, frame0) * 0.5)
     kernel = fb._window_kernel("gaussian", 9, None, frame0)
     g11, g12, g22, _, _ = separable_filter(matrices, kernel, kernel, border="replicate").unbind(1)
     systems = torch.stack((g11, g12, g12, g22), -1).unflatten(-1, (2, 2))
